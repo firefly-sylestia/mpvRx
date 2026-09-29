@@ -2503,7 +2503,7 @@ fun AudioPlayerControls(
           }
         }
       }
-    } else if (isTabletLandscape) {
+    } else if (isTabletLandscape && (showVisualizer || tabletDualPaneTab == 1)) {
       Row(
         modifier = Modifier.fillMaxSize(),
         horizontalArrangement = Arrangement.spacedBy(20.dp),

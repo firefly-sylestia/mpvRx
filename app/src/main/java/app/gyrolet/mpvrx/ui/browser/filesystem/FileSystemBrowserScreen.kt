@@ -390,7 +390,11 @@ fun FileSystemBrowserScreen(path: String? = null) {
       zipImportJob?.cancel()
       zipImportJob =
         coroutineScope.launch {
-          zipImportState.value = ZipImportProgress(label = "Adding archive", progress = -1f)
+          zipImportState.value =
+            ZipImportProgress(
+              label = context.getString(app.gyrolet.mpvrx.R.string.ui_adding_archive),
+              progress = -1f,
+            )
           val resolvedPath =
             try {
               ZipArchiveMedia.resolveZipPath(context, uri)
@@ -414,7 +418,10 @@ fun FileSystemBrowserScreen(path: String? = null) {
               ZipArchiveMedia.registerArchive(resolvedPath, includeAudio) { scanned, total ->
                 zipImportState.value =
                   ZipImportProgress(
-                    label = "Scanning archive",
+                    label =
+                      context.getString(
+                        app.gyrolet.mpvrx.R.string.ui_scanning_archive,
+                      ),
                     detail = archiveFile.name,
                     progress = if (total > 0) scanned.toFloat() / total.toFloat() else -1f,
                   )
@@ -755,28 +762,6 @@ fun FileSystemBrowserScreen(path: String? = null) {
                     text =
                       androidx.compose.ui.res
                         .stringResource(app.gyrolet.mpvrx.R.string.ui_open_file),
-                  )
-                },
-              )
-
-              FloatingActionButtonMenuItem(
-                onClick = {
-                  isFabExpanded.value = false
-                  zipPicker.launch(
-                    arrayOf(
-                      "application/zip",
-                      "application/x-zip-compressed",
-                      "application/x-zip",
-                      "application/octet-stream",
-                    ),
-                  )
-                },
-                icon = { Icon(Icons.RoundedFilled.FolderZip, contentDescription = null) },
-                text = {
-                  Text(
-                    text =
-                      androidx.compose.ui.res
-                        .stringResource(app.gyrolet.mpvrx.R.string.ui_open_zip_folder),
                   )
                 },
               )

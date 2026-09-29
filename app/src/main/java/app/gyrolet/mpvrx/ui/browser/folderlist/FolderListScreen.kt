@@ -372,7 +372,11 @@ object FolderListScreen : Screen {
         zipImportJob?.cancel()
         zipImportJob =
           coroutineScope.launch {
-            zipImportState.value = ZipImportProgress(label = "Adding archive", progress = -1f)
+            zipImportState.value =
+              ZipImportProgress(
+                label = context.getString(R.string.ui_adding_archive),
+                progress = -1f,
+              )
             val resolvedPath =
               try {
                 ZipArchiveMedia.resolveZipPath(context, uri)
@@ -392,7 +396,7 @@ object FolderListScreen : Screen {
                 ZipArchiveMedia.registerArchive(resolvedPath, includeAudio) { scanned, total ->
                   zipImportState.value =
                     ZipImportProgress(
-                      label = "Scanning archive",
+                      label = context.getString(R.string.ui_scanning_archive),
                       detail = archiveFile.name,
                       progress = if (total > 0) scanned.toFloat() / total.toFloat() else -1f,
                     )
@@ -896,28 +900,6 @@ object FolderListScreen : Screen {
                     text =
                       androidx.compose.ui.res
                         .stringResource(app.gyrolet.mpvrx.R.string.ui_open_file),
-                  )
-                },
-              )
-
-              FloatingActionButtonMenuItem(
-                onClick = {
-                  isFabExpanded.value = false
-                  zipPicker.launch(
-                    arrayOf(
-                      "application/zip",
-                      "application/x-zip-compressed",
-                      "application/x-zip",
-                      "application/octet-stream",
-                    ),
-                  )
-                },
-                icon = { Icon(Icons.RoundedFilled.FolderZip, contentDescription = null) },
-                text = {
-                  Text(
-                    text =
-                      androidx.compose.ui.res
-                        .stringResource(app.gyrolet.mpvrx.R.string.ui_open_zip_folder),
                   )
                 },
               )

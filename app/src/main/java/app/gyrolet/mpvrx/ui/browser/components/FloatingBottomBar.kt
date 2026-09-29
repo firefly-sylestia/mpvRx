@@ -41,8 +41,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
-import app.gyrolet.mpvrx.presentation.components.FrozenSurfaceStyle
-import app.gyrolet.mpvrx.presentation.components.frozenSurface
 import app.gyrolet.mpvrx.ui.icons.AppIcon
 import app.gyrolet.mpvrx.ui.icons.Icon
 import app.gyrolet.mpvrx.ui.icons.Icons
@@ -257,15 +255,11 @@ fun BrowserBottomBar(
             .padding(
               horizontal = layoutParams.surfacePaddingHorizontal,
               vertical = layoutParams.surfacePaddingVertical,
-            )
-            .frozenSurface(
-              shape = RoundedCornerShape(percent = 100),
-              style = FrozenSurfaceStyle.FloatingControl,
             ),
         shape = RoundedCornerShape(percent = 100),
-        color = Color.Transparent,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
         tonalElevation = 0.dp,
-        shadowElevation = 0.dp,
+        shadowElevation = 12.dp,
       ) {
         Row(
           modifier =

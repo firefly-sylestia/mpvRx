@@ -27,6 +27,7 @@ jobs:
       publication_mode: ${{ steps.activity.outputs.publication_mode }}
       commit_count: ${{ steps.metadata.outputs.commit_count }}
       source_sha: ${{ steps.metadata.outputs.source_sha }}
+      commit_title: ${{ steps.metadata.outputs.commit_title }}
       published_at: ${{ steps.metadata.outputs.published_at }}
 
     steps:
@@ -106,6 +107,7 @@ jobs:
           {
             echo "commit_count=$(git rev-list --count HEAD)"
             echo "source_sha=$(git rev-parse HEAD)"
+            echo "commit_title=$(git log -1 --format=%s)"
             echo "published_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           } >> "$GITHUB_OUTPUT"
 
@@ -201,6 +203,7 @@ jobs:
     env:
       COMMIT_COUNT: ${{ needs.check.outputs.commit_count }}
       SOURCE_SHA: ${{ needs.check.outputs.source_sha }}
+      COMMIT_TITLE: ${{ needs.check.outputs.commit_title }}
       PUBLISHED_AT: ${{ needs.check.outputs.published_at }}
       SOURCE_FINGERPRINT: ${{ needs.check.outputs.source_fingerprint }}
       SELECTED_FLAVOR: ${{ needs.check.outputs.selected_flavor }}
@@ -245,6 +248,7 @@ jobs:
           base_url = os.environ["SITE_BASE_URL"].rstrip("/")
           commit_count = int(os.environ["COMMIT_COUNT"])
           source_sha = os.environ["SOURCE_SHA"]
+          commit_title = os.environ["COMMIT_TITLE"]
           published_at = os.environ["PUBLISHED_AT"]
           run_id = int(os.environ["SOURCE_RUN_ID"])
           run_number = int(os.environ["SOURCE_RUN_NUMBER"])
@@ -284,6 +288,7 @@ jobs:
               "tag_name": f"preview-r{commit_count}",
               "name": f"mpvRx Preview r{commit_count}",
               "body": (
+                  f"Commit: {commit_title}\n\n"
                   f"{publication_mode.title()} preview from workflow run #{run_number}. "
                   f"Source commit: {source_sha[:7]}."
               ),
@@ -291,6 +296,7 @@ jobs:
               "assets": assets,
               "channel": "preview",
               "commit_sha": source_sha,
+              "commit_title": commit_title,
               "commit_count": commit_count,
               "source_fingerprint": source_fingerprint,
               "website_visible": website_visible,

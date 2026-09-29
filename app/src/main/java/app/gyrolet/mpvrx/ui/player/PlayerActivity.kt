@@ -7919,7 +7919,10 @@ private suspend fun restorePlaybackPosition(state: PlaybackStateEntity?, loadGen
             if (networkSource == null) uri.resolveLocalPath(this)?.let(PlaybackIdentity::forLocalPath) else null,
           title = title,
           artist = existingItem?.artist,
-          mimeType = launchMimeType,
+          mimeType =
+            app.gyrolet.mpvrx.domain.archive.ZipArchiveMedia.entryPathOf(uri.toString())?.let { entry ->
+              app.gyrolet.mpvrx.utils.storage.FileTypeUtils.getMimeTypeFromExtension(entry.substringAfterLast('.').lowercase())
+            } ?: launchMimeType,
           headers = headers,
           networkSource = networkSource,
           playlistItemId = databaseItem?.id,
@@ -7929,6 +7932,8 @@ private suspend fun restorePlaybackPosition(state: PlaybackStateEntity?, loadGen
               ?: existingItem?.artworkUri
               ?: (if (index == playlistIndex) launchPosterUrl else null),
           durationSeconds = existingItem?.durationSeconds,
+          videoWidth = existingItem?.videoWidth ?: 0,
+          videoHeight = existingItem?.videoHeight ?: 0,
         )
       }
 

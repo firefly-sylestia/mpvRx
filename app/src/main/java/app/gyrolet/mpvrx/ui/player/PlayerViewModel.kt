@@ -37,6 +37,8 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.gyrolet.mpvrx.R
+import app.gyrolet.mpvrx.data.network.client.NetworkMimeTypes
+import app.gyrolet.mpvrx.data.network.proxy.NetworkStreamingProxy
 import app.gyrolet.mpvrx.domain.anime4k.Anime4KManager
 import app.gyrolet.mpvrx.domain.autocrop.AutoCropAnalyzer
 import app.gyrolet.mpvrx.domain.autocrop.AutoCropEdges
@@ -120,6 +122,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -3140,6 +3143,8 @@ val isBrightnessSliderShown = MutableStateFlow(false)
       setOf("fd", "fdclose", "edl", "memory", "null", "av", "lavf", "archive", "slice", "mf", "hex", "bd", "dvd", "dvb")
     const val PLAYLIST_METADATA_PREFETCH_RADIUS = 40
     const val PLAYLIST_METADATA_PREFETCH_LIMIT = 120
+    const val PLAYLIST_NETWORK_METADATA_PREFETCH_RADIUS = 3
+    const val PLAYLIST_NETWORK_METADATA_TIMEOUT_MS = 8_000L
     const val INTRO_MARKER_CACHE_PREFS = "intro_marker_cache"
     const val INTRO_MARKER_CACHE_PREFIX = "intro_marker:v3:"
     const val INTRO_MARKER_CACHE_MAX_ENTRIES = 200
@@ -6248,9 +6253,20 @@ val isBrightnessSliderShown = MutableStateFlow(false)
           ?.takeIf { seconds -> seconds > 0 }
           ?.let { seconds -> formatDuration(seconds * 1000L) }
           .orEmpty()
-      val (durationStr, resolutionStr) =
-        synchronized(metadataCache) { metadataCache[cacheKey] }
-          ?: (extractedDuration to "")
+      val knownResolution =
+        when {
+          isAudio -> ""
+          isCurrentlyPlaying -> {
+            val width = PlaybackSession.getPropertyInt("video-params/w") ?: item.videoWidth
+            val height = PlaybackSession.getPropertyInt("video-params/h") ?: item.videoHeight
+            if (width > 0 && height > 0) "${width}x$height" else ""
+          }
+          item.videoWidth > 0 && item.videoHeight > 0 -> "${item.videoWidth}x${item.videoHeight}"
+          else -> ""
+        }
+      val cachedMetadata = synchronized(metadataCache) { metadataCache[cacheKey] }
+      val durationStr = cachedMetadata?.first?.takeIf(String::isNotBlank) ?: extractedDuration
+      val resolutionStr = cachedMetadata?.second?.takeIf(String::isNotBlank) ?: knownResolution
 
       app.gyrolet.mpvrx.ui.player.controls.components.sheets.PlaylistItem(
         uri = resolvedUri,
@@ -6272,6 +6288,7 @@ val isBrightnessSliderShown = MutableStateFlow(false)
   }
 
   private fun getVideoMetadata(uri: Uri): Pair<String, String> {
+    if (app.gyrolet.mpvrx.domain.archive.ZipArchiveMedia.isPlaybackUri(uri.toString())) return "" to ""
     val resolvedUri =
       if (uri.scheme == "content") {
         uri.extractLocalPath()?.let { Uri.fromFile(File(it)) } ?: uri
@@ -6318,26 +6335,7 @@ val isBrightnessSliderShown = MutableStateFlow(false)
         retriever.setDataSource(appContext, resolvedUri)
       }
 
-      // Get duration
-      val durationMs = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
-      val durationStr =
-        if (durationMs != null) {
-          formatDuration(durationMs.toLong())
-        } else {
-          ""
-        }
-
-      // Get resolution
-      val width = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-      val height = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-      val resolutionStr =
-        if (width != null && height != null) {
-          "${width}x$height"
-        } else {
-          ""
-        }
-
-      durationStr to resolutionStr
+      retriever.playlistMetadata()
     } catch (e: Exception) {
       android.util.Log.e("PlayerViewModel", "Failed to get video metadata for $resolvedUri", e)
       "" to ""
@@ -6348,6 +6346,60 @@ val isBrightnessSliderShown = MutableStateFlow(false)
         // Ignore release errors
       }
     }
+  }
+
+  private suspend fun getVideoMetadata(item: app.gyrolet.mpvrx.ui.player.controls.components.sheets.PlaylistItem): Pair<String, String> {
+    val connectionId = item.networkConnectionId
+    if (!item.isAudio && connectionId != null && item.networkPath.isNotBlank()) {
+      return getNetworkVideoMetadata(connectionId, item.networkPath)
+    }
+    return getVideoMetadata(item.uri)
+  }
+
+  private suspend fun getNetworkVideoMetadata(
+    connectionId: Long,
+    path: String,
+  ): Pair<String, String> =
+    withTimeoutOrNull(PLAYLIST_NETWORK_METADATA_TIMEOUT_MS) {
+      runInterruptible(Dispatchers.IO) {
+        val proxy = NetworkStreamingProxy.getInstance()
+        val streamId = "playlist_metadata_${connectionId}_${path.hashCode()}_${System.nanoTime()}"
+        val retriever = android.media.MediaMetadataRetriever()
+        try {
+          val localUrl =
+            proxy.registerStream(
+              streamId = streamId,
+              connectionId = connectionId,
+              filePath = path,
+              mimeType = NetworkMimeTypes.forFileName(path) ?: "application/octet-stream",
+            )
+          retriever.setDataSource(
+            localUrl,
+            mapOf(
+              "User-Agent" to "Mozilla/5.0 (Android) mpvRx",
+              "Accept" to "*/*",
+            ),
+          )
+          retriever.playlistMetadata()
+        } catch (e: Exception) {
+          android.util.Log.w("PlayerViewModel", "Failed to get network video metadata", e)
+          "" to ""
+        } finally {
+          runCatching { retriever.release() }
+          proxy.unregisterStream(streamId)
+        }
+      }
+    } ?: ("" to "")
+
+  private fun android.media.MediaMetadataRetriever.playlistMetadata(): Pair<String, String> {
+    val durationStr =
+      extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+        ?.toLongOrNull()
+        ?.let(::formatDuration)
+        .orEmpty()
+    val width = extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+    val height = extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+    return durationStr to if (width > 0 && height > 0) "${width}x$height" else ""
   }
 
   /**
@@ -6575,15 +6627,19 @@ val isBrightnessSliderShown = MutableStateFlow(false)
           }
         }
 
+        val currentIndex = queue.currentIndex.coerceIn(0, items.lastIndex)
         val metadataItems =
           if (items.size <= PLAYLIST_METADATA_PREFETCH_LIMIT) {
             items
           } else {
-            val currentIndex = queue.currentIndex.coerceIn(0, items.lastIndex)
             val startIndex = maxOf(0, currentIndex - PLAYLIST_METADATA_PREFETCH_RADIUS)
             val endIndex = minOf(items.lastIndex, currentIndex + PLAYLIST_METADATA_PREFETCH_RADIUS)
             items.subList(startIndex, endIndex + 1)
-          }.filter { item -> queue.items.getOrNull(item.index)?.durationSeconds == null }
+          }.filter { item ->
+            item.duration.isBlank() || (!item.isAudio && item.resolution.isBlank())
+          }.filter { item ->
+            item.networkConnectionId == null || abs(item.index - currentIndex) <= PLAYLIST_NETWORK_METADATA_PREFETCH_RADIUS
+          }
 
         // Limit concurrent metadata extraction to avoid overwhelming resources
         val batchSize = 5
@@ -6594,14 +6650,19 @@ val isBrightnessSliderShown = MutableStateFlow(false)
           batch.forEach { item ->
             val cacheKey = item.uri.toString()
 
-            // Skip if already in cache (LruCache is thread-safe)
-            if (metadataCache.get(cacheKey) == null) {
+            val cached = metadataCache.get(cacheKey)
+            val needsDuration = item.duration.isBlank() && cached?.first.isNullOrBlank()
+            val needsResolution = !item.isAudio && item.resolution.isBlank() && cached?.second.isNullOrBlank()
+            if (cached == null && (needsDuration || needsResolution)) {
               // Extract metadata
-              val (durationStr, resolutionStr) = getVideoMetadata(item.uri)
+              val (durationStr, resolutionStr) = getVideoMetadata(item)
 
               // Update cache and track update
-              updateMetadataCache(cacheKey, durationStr to resolutionStr)
-              updates[cacheKey] = durationStr to resolutionStr
+              val merged =
+                (durationStr.takeIf(String::isNotBlank) ?: cached?.first.orEmpty()) to
+                  (resolutionStr.takeIf(String::isNotBlank) ?: cached?.second.orEmpty())
+              updateMetadataCache(cacheKey, merged)
+              updates[cacheKey] = merged
             }
           }
 
@@ -6611,7 +6672,10 @@ val isBrightnessSliderShown = MutableStateFlow(false)
               _playlistItems.value.map { currentItem ->
                 val cacheKey = currentItem.uri.toString()
                 val (durationStr, resolutionStr) = updates[cacheKey] ?: return@map currentItem
-                currentItem.copy(duration = durationStr, resolution = resolutionStr)
+                currentItem.copy(
+                  duration = durationStr.ifBlank { currentItem.duration },
+                  resolution = resolutionStr.ifBlank { currentItem.resolution },
+                )
               }
           }
         }

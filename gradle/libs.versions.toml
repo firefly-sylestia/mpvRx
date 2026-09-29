@@ -44,7 +44,8 @@ seeker = "2.0.1"
 markdownRenderer = "0.45.0"
 kotlinTest = "2.4.20"
 mediainfo = "v1.0.0-fix"
-mpvlib = "1.0.9"
+mpvlib = "1.0.10"
+mpvlibFongmi = "1.0.9"
 googleCast = "22.3.1"
 androidxBiometric = "1.4.0-alpha07"
 leakcanary = "2.14"
@@ -54,7 +55,8 @@ libtorrent4j = "2.1.0-39"
 libarchiveAndroid = "1.1.6"
 ktlint = "14.2.0"
 telephoto = "0.19.0"
-haze = "1.7.2"
+backdrop = "2.0.1"
+haze = "2.0.0"
 
 [libraries]
 androidx-profileinstaller = { group = "androidx.profileinstaller", name = "profileinstaller", version.ref = "profileinstaller" }
@@ -89,7 +91,7 @@ kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotl
 mediainfo-lib = { module = "com.github.marlboro-advance:mediainfoAndroid", version.ref = "mediainfo" }
 mpvlib-standard = { module = "app.gyrolet.mpvlib:mpvlib", version.ref = "mpvlib" }
 mpvlib-no-vulkan = { module = "app.gyrolet.mpvlib:mpvlib-no-vulkan", version.ref = "mpvlib" }
-mpvlib-fongmi = { module = "app.gyrolet.mpvlib:mpvlib-fongmi", version.ref = "mpvlib" }
+mpvlib-fongmi = { module = "app.gyrolet.mpvlib:mpvlib-fongmi", version.ref = "mpvlibFongmi" }
 
 google-material = { module = "com.google.android.material:material", version.ref = "googleMaterial" }
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "androidxCore" }
@@ -139,7 +141,8 @@ libtorrent4j-android-x86 = { module = "org.libtorrent4j:libtorrent4j-android-x86
 libtorrent4j-android-x8664 = { module = "org.libtorrent4j:libtorrent4j-android-x86_64", version.ref = "libtorrent4j" }
 libarchive-android = { module = "me.zhanghai.android.libarchive:library", version.ref = "libarchiveAndroid" }
 telephoto-zoomable = { module = "me.saket.telephoto:zoomable", version.ref = "telephoto" }
-haze = { module = "dev.chrisbanes.haze:haze", version.ref = "haze" }
+backdrop = { module = "io.github.kyant0:backdrop", version.ref = "backdrop" }
+haze-blur = { module = "dev.chrisbanes.haze:haze-blur", version.ref = "haze" }
 
 [bundles]
 koin = ["koin-core", "koin-android", "koin-compose", "koin-viewmodel"]

@@ -150,6 +150,8 @@ object MediaUtils {
           title = video.displayName,
           mimeType = if (video.isAudio) "audio/*" else video.mimeType,
           durationSeconds = (video.duration / 1000L).toInt().takeIf { it > 0 },
+          videoWidth = video.width,
+          videoHeight = video.height,
         )
       }
 

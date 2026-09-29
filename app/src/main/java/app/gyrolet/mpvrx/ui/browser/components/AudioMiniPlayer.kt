@@ -45,8 +45,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import app.gyrolet.mpvrx.presentation.components.FrozenSurface
-import app.gyrolet.mpvrx.presentation.components.FrozenSurfaceStyle
+import app.gyrolet.mpvrx.presentation.components.LiquidGlassStyle
+import app.gyrolet.mpvrx.presentation.components.LiquidGlassSurface
 import app.gyrolet.mpvrx.ui.icons.Icon
 import app.gyrolet.mpvrx.ui.icons.Icons
 import app.gyrolet.mpvrx.ui.player.MediaPlaybackService
@@ -73,7 +73,7 @@ fun AudioMiniPlayer(modifier: Modifier = Modifier) {
       ?: "Audio Track"
   val miniPlayerShape = RoundedCornerShape(24.dp)
 
-  FrozenSurface(
+  LiquidGlassSurface(
     modifier =
       modifier
         .fillMaxWidth()
@@ -91,8 +91,8 @@ fun AudioMiniPlayer(modifier: Modifier = Modifier) {
           context.startActivity(intent)
         },
       shape = miniPlayerShape,
-      style = FrozenSurfaceStyle.MiniPlayer,
-      tintColor = MaterialTheme.colorScheme.primary,
+      style = LiquidGlassStyle.MiniPlayer,
+      glassColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.30f),
       fallbackColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.95f),
   ) {
     val primaryContainerColor = MaterialTheme.colorScheme.primaryContainer

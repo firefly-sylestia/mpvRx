@@ -155,6 +155,8 @@ import app.gyrolet.mpvrx.ui.browser.cards.SelectionIndicator
 import app.gyrolet.mpvrx.ui.browser.cards.animatedSelectionColor
 import app.gyrolet.mpvrx.ui.player.PlaybackSession
 import app.gyrolet.mpvrx.ui.components.InlineSearchBar
+import app.gyrolet.mpvrx.ui.browser.components.ExpressiveScrollBar
+import app.gyrolet.mpvrx.ui.browser.components.fastScrollGlyph
 import app.gyrolet.mpvrx.ui.icons.Icon
 import app.gyrolet.mpvrx.ui.icons.Icons
 import app.gyrolet.mpvrx.ui.theme.AppShapeScale
@@ -309,10 +311,9 @@ fun MusicLibraryContent(
       MusicTab.SONGS -> (items as List<MusicSong>).map { song -> song.toVideo() }
       MusicTab.ALBUMS -> {
         val selectedAlbums = items as List<MusicAlbum>
-        songs
-          .filter { song ->
-            selectedAlbums.any { album -> song.albumKey == album.id }
-          }.map { song -> song.toVideo() }
+        selectedAlbums
+          .flatMap { album -> songs.filter { song -> song.albumKey == album.id }.sortedByAlbumTrack() }
+          .map { song -> song.toVideo() }
       }
       MusicTab.ARTISTS -> {
         val selectedArtists = items as List<MusicArtist>
@@ -517,7 +518,10 @@ fun MusicLibraryContent(
                   MusicTab.ALBUMS -> {
                     @Suppress("UNCHECKED_CAST")
                     val selAlbums = items as List<MusicAlbum>
-                    val albumSongs = songs.filter { song -> selAlbums.any { album -> song.albumKey == album.id } }
+                    val albumSongs =
+                      selAlbums.flatMap { album ->
+                        songs.filter { song -> song.albumKey == album.id }.sortedByAlbumTrack()
+                      }
                     musicViewModel.playAllSongs(context, albumSongs, shuffle = false)
                   }
                   MusicTab.ARTISTS -> {
@@ -822,7 +826,7 @@ fun MusicLibraryContent(
         // Album Detail Sheet
         selectedAlbum?.let { album ->
           val albumSongs = remember(songs, album) {
-            songs.filter { it.albumKey == album.id }
+            songs.filter { it.albumKey == album.id }.sortedByAlbumTrack()
           }
           AlbumDetailSheet(
             album = album,
@@ -988,7 +992,7 @@ fun MusicLibraryContent(
         // Album Options Sheet
         selectedAlbumForOptions?.let { album ->
           val albumSongs = remember(songs, album) {
-            songs.filter { it.albumKey == album.id }
+            songs.filter { it.albumKey == album.id }.sortedByAlbumTrack()
           }
           ModalBottomSheet(
             onDismissRequest = { selectedAlbumForOptions = null },
@@ -1265,7 +1269,9 @@ fun LocalAlbumArtImage(
   BoxWithConstraints(modifier = modifier, contentAlignment = Alignment.Center) {
     val widthPx = with(density) { if (maxWidth.value.isFinite()) maxWidth.roundToPx().coerceAtLeast(1) else 256 }
     val heightPx = with(density) { if (maxHeight.value.isFinite()) maxHeight.roundToPx().coerceAtLeast(1) else 256 }
-    var bitmap by remember(uri, video, widthPx, heightPx) { mutableStateOf<ImageBitmap?>(null) }
+    var bitmap by remember(uri, video, widthPx, heightPx) {
+      mutableStateOf(video?.let { thumbnailRepository.peekThumbnailFromMemory(it, widthPx, heightPx) }?.asImageBitmap())
+    }
 
     LaunchedEffect(uri, video, widthPx, heightPx) {
       bitmap = withContext(Dispatchers.IO) {
@@ -1341,6 +1347,34 @@ private fun ArtistAvatarImage(
 }
 
 @Composable
+private fun MusicTabScrollBar(
+  viewMode: MusicViewMode,
+  listState: LazyListState,
+  gridState: LazyGridState,
+  bottomPadding: Dp,
+  dragLabelProvider: (Int) -> String?,
+  modifier: Modifier = Modifier,
+) {
+  val canScroll by remember(viewMode, listState, gridState) {
+    derivedStateOf {
+      if (viewMode == MusicViewMode.GRID) {
+        gridState.canScrollBackward || gridState.canScrollForward
+      } else {
+        listState.canScrollBackward || listState.canScrollForward
+      }
+    }
+  }
+  if (!canScroll) return
+
+  ExpressiveScrollBar(
+    listState = listState.takeUnless { viewMode == MusicViewMode.GRID },
+    gridState = gridState.takeIf { viewMode == MusicViewMode.GRID },
+    dragLabelProvider = dragLabelProvider,
+    modifier = modifier.padding(end = 2.dp, top = 6.dp, bottom = bottomPadding + 6.dp),
+  )
+}
+
+@Composable
 private fun SongsTabContent(
   songs: List<MusicSong>,
   viewMode: MusicViewMode,
@@ -1373,7 +1407,7 @@ private fun SongsTabContent(
     }
 
   val navBarHeight = LocalNavigationBarHeight.current.takeIf { it > 0.dp } ?: 88.dp
-  Column(modifier = Modifier.fillMaxSize()) {
+  Box(modifier = Modifier.fillMaxSize()) {
     if (viewMode == MusicViewMode.GRID) {
       LazyVerticalGrid(
         state = gridState,
@@ -1420,6 +1454,15 @@ private fun SongsTabContent(
         }
       }
     }
+
+    MusicTabScrollBar(
+      viewMode = viewMode,
+      listState = listState,
+      gridState = gridState,
+      bottomPadding = navBarHeight,
+      dragLabelProvider = { index -> fastScrollGlyph(songs.getOrNull(index)?.title) },
+      modifier = Modifier.align(Alignment.CenterEnd),
+    )
   }
 }
 
@@ -1574,40 +1617,51 @@ private fun AlbumsTabContent(
   }
 
   val navBarHeight = LocalNavigationBarHeight.current.takeIf { it > 0.dp } ?: 88.dp
-  if (viewMode == MusicViewMode.GRID) {
-    LazyVerticalGrid(
-      state = gridState,
-      columns = GridCells.Adaptive(minSize = gridCoverArtSizeDp.dp),
-      modifier = Modifier.fillMaxSize(),
-      contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = navBarHeight + 16.dp),
-      verticalArrangement = Arrangement.spacedBy(14.dp),
-      horizontalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-      items(albums, key = { it.id }) { album ->
-        AlbumGridCard(
-          album = album,
-          isSelected = selectionManager.isSelected(album),
-          onClick = { onAlbumClick(album) },
-          onLongClick = { onAlbumLongClick(album) }
-        )
+  Box(modifier = Modifier.fillMaxSize()) {
+    if (viewMode == MusicViewMode.GRID) {
+      LazyVerticalGrid(
+        state = gridState,
+        columns = GridCells.Adaptive(minSize = gridCoverArtSizeDp.dp),
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = navBarHeight + 16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
+      ) {
+        items(albums, key = { it.id }) { album ->
+          AlbumGridCard(
+            album = album,
+            isSelected = selectionManager.isSelected(album),
+            onClick = { onAlbumClick(album) },
+            onLongClick = { onAlbumLongClick(album) }
+          )
+        }
+      }
+    } else {
+      LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 0.dp, top = 8.dp, end = 0.dp, bottom = navBarHeight + 16.dp)
+      ) {
+        items(albums, key = { it.id }) { album ->
+          AlbumListCard(
+            album = album,
+            isSelected = selectionManager.isSelected(album),
+            coverArtSizeDp = coverArtSizeDp,
+            onClick = { onAlbumClick(album) },
+            onLongClick = { onAlbumLongClick(album) }
+          )
+        }
       }
     }
-  } else {
-    LazyColumn(
-      state = listState,
-      modifier = Modifier.fillMaxSize(),
-      contentPadding = PaddingValues(start = 0.dp, top = 8.dp, end = 0.dp, bottom = navBarHeight + 16.dp)
-    ) {
-      items(albums, key = { it.id }) { album ->
-        AlbumListCard(
-          album = album,
-          isSelected = selectionManager.isSelected(album),
-          coverArtSizeDp = coverArtSizeDp,
-          onClick = { onAlbumClick(album) },
-          onLongClick = { onAlbumLongClick(album) }
-        )
-      }
-    }
+
+    MusicTabScrollBar(
+      viewMode = viewMode,
+      listState = listState,
+      gridState = gridState,
+      bottomPadding = navBarHeight,
+      dragLabelProvider = { index -> fastScrollGlyph(albums.getOrNull(index)?.title) },
+      modifier = Modifier.align(Alignment.CenterEnd),
+    )
   }
 }
 
@@ -1779,40 +1833,51 @@ private fun ArtistsTabContent(
   }
 
   val navBarHeight = LocalNavigationBarHeight.current.takeIf { it > 0.dp } ?: 88.dp
-  if (viewMode == MusicViewMode.GRID) {
-    LazyVerticalGrid(
-      state = gridState,
-      columns = GridCells.Adaptive(minSize = (gridCoverArtSizeDp * 1.1f).toInt().dp),
-      modifier = Modifier.fillMaxSize(),
-      contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = navBarHeight + 16.dp),
-      verticalArrangement = Arrangement.spacedBy(16.dp),
-      horizontalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-      items(artists, key = { it.id }) { artist ->
-        ArtistGridCard(
-          artist = artist,
-          isSelected = selectionManager.isSelected(artist),
-          onClick = { onArtistClick(artist) },
-          onLongClick = { onArtistLongClick(artist) }
-        )
+  Box(modifier = Modifier.fillMaxSize()) {
+    if (viewMode == MusicViewMode.GRID) {
+      LazyVerticalGrid(
+        state = gridState,
+        columns = GridCells.Adaptive(minSize = (gridCoverArtSizeDp * 1.1f).toInt().dp),
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = navBarHeight + 16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(16.dp)
+      ) {
+        items(artists, key = { it.id }) { artist ->
+          ArtistGridCard(
+            artist = artist,
+            isSelected = selectionManager.isSelected(artist),
+            onClick = { onArtistClick(artist) },
+            onLongClick = { onArtistLongClick(artist) }
+          )
+        }
+      }
+    } else {
+      LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 0.dp, top = 8.dp, end = 0.dp, bottom = navBarHeight + 16.dp)
+      ) {
+        items(artists, key = { it.id }) { artist ->
+          ArtistListCard(
+            artist = artist,
+            isSelected = selectionManager.isSelected(artist),
+            coverArtSizeDp = coverArtSizeDp,
+            onClick = { onArtistClick(artist) },
+            onLongClick = { onArtistLongClick(artist) }
+          )
+        }
       }
     }
-  } else {
-    LazyColumn(
-      state = listState,
-      modifier = Modifier.fillMaxSize(),
-      contentPadding = PaddingValues(start = 0.dp, top = 8.dp, end = 0.dp, bottom = navBarHeight + 16.dp)
-    ) {
-      items(artists, key = { it.id }) { artist ->
-        ArtistListCard(
-          artist = artist,
-          isSelected = selectionManager.isSelected(artist),
-          coverArtSizeDp = coverArtSizeDp,
-          onClick = { onArtistClick(artist) },
-          onLongClick = { onArtistLongClick(artist) }
-        )
-      }
-    }
+
+    MusicTabScrollBar(
+      viewMode = viewMode,
+      listState = listState,
+      gridState = gridState,
+      bottomPadding = navBarHeight,
+      dragLabelProvider = { index -> fastScrollGlyph(artists.getOrNull(index)?.name) },
+      modifier = Modifier.align(Alignment.CenterEnd),
+    )
   }
 }
 
@@ -2275,52 +2340,63 @@ private fun PlaylistsTabContent(
       EmptyMusicState(text = "No playlists found. Create one!")
     } else {
       val navBarHeight = LocalNavigationBarHeight.current.takeIf { it > 0.dp } ?: 88.dp
-      if (viewMode == MusicViewMode.GRID) {
-        LazyVerticalGrid(
-          state = gridState,
-          columns = GridCells.Adaptive(minSize = gridCoverArtSizeDp.dp),
-          modifier = Modifier.fillMaxSize(),
-          contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = navBarHeight + 16.dp),
-          verticalArrangement = Arrangement.spacedBy(14.dp),
-          horizontalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-          items(playlists, key = { it.id }) { playlist ->
-            val details = playlistDetails[playlist.id]
-            val itemCount = details?.first ?: 0
-            val artworkSongs = details?.second ?: emptyList()
-            MusicPlaylistCard(
-              playlist = playlist,
-              itemCount = itemCount,
-              artworkSongs = artworkSongs,
-              isSelected = selectionManager.isSelected(playlist),
-              isGridMode = true,
-              onClick = { onPlaylistClick(playlist) },
-              onLongClick = { onPlaylistLongClick(playlist) }
-            )
+      Box(modifier = Modifier.fillMaxSize()) {
+        if (viewMode == MusicViewMode.GRID) {
+          LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Adaptive(minSize = gridCoverArtSizeDp.dp),
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = navBarHeight + 16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+          ) {
+            items(playlists, key = { it.id }) { playlist ->
+              val details = playlistDetails[playlist.id]
+              val itemCount = details?.first ?: 0
+              val artworkSongs = details?.second ?: emptyList()
+              MusicPlaylistCard(
+                playlist = playlist,
+                itemCount = itemCount,
+                artworkSongs = artworkSongs,
+                isSelected = selectionManager.isSelected(playlist),
+                isGridMode = true,
+                onClick = { onPlaylistClick(playlist) },
+                onLongClick = { onPlaylistLongClick(playlist) }
+              )
+            }
+          }
+        } else {
+          LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 0.dp, top = 8.dp, end = 0.dp, bottom = navBarHeight + 16.dp)
+          ) {
+            items(playlists, key = { it.id }) { playlist ->
+              val details = playlistDetails[playlist.id]
+              val itemCount = details?.first ?: 0
+              val artworkSongs = details?.second ?: emptyList()
+              MusicPlaylistCard(
+                playlist = playlist,
+                itemCount = itemCount,
+                artworkSongs = artworkSongs,
+                isSelected = selectionManager.isSelected(playlist),
+                isGridMode = false,
+                coverArtSizeDp = coverArtSizeDp,
+                onClick = { onPlaylistClick(playlist) },
+                onLongClick = { onPlaylistLongClick(playlist) }
+              )
+            }
           }
         }
-      } else {
-        LazyColumn(
-          state = listState,
-          modifier = Modifier.fillMaxSize(),
-          contentPadding = PaddingValues(start = 0.dp, top = 8.dp, end = 0.dp, bottom = navBarHeight + 16.dp)
-        ) {
-          items(playlists, key = { it.id }) { playlist ->
-            val details = playlistDetails[playlist.id]
-            val itemCount = details?.first ?: 0
-            val artworkSongs = details?.second ?: emptyList()
-            MusicPlaylistCard(
-              playlist = playlist,
-              itemCount = itemCount,
-              artworkSongs = artworkSongs,
-              isSelected = selectionManager.isSelected(playlist),
-              isGridMode = false,
-              coverArtSizeDp = coverArtSizeDp,
-              onClick = { onPlaylistClick(playlist) },
-              onLongClick = { onPlaylistLongClick(playlist) }
-            )
-          }
-        }
+
+        MusicTabScrollBar(
+          viewMode = viewMode,
+          listState = listState,
+          gridState = gridState,
+          bottomPadding = navBarHeight,
+          dragLabelProvider = { index -> fastScrollGlyph(playlists.getOrNull(index)?.name) },
+          modifier = Modifier.align(Alignment.CenterEnd),
+        )
       }
     }
   }

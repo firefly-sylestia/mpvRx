@@ -340,6 +340,8 @@ fun MediaLibraryContent(forceAudio: Boolean = false) {
         title = item.displayName,
         mimeType = item.mimeType,
         durationSeconds = (item.duration / 1000L).toInt().takeIf { it > 0 },
+        videoWidth = item.width,
+        videoHeight = item.height,
       )
     }
     val isAudio = mediaType == MediaLibraryType.Audio || video.isAudio

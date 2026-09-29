@@ -59,7 +59,10 @@ object MetadataRetrieval {
   ): List<Video> =
     withContext(Dispatchers.IO) {
       val metadataChipsEnabled = isVideoMetadataNeeded(browserPreferences)
-      if (!metadataChipsEnabled) {
+      // Archive entries are not in MediaStore, so their runtime is only available by reading the
+      // entry, and the browser always wants it.
+      val hasArchiveEntries = videos.any { video -> ZipArchiveMedia.isPlaybackUri(video.uri.toString()) }
+      if (!metadataChipsEnabled && !hasArchiveEntries) {
         return@withContext videos
       }
 
@@ -94,7 +97,6 @@ object MetadataRetrieval {
 
       val metadataMap =
         extractMetadataByVideoPath(
-          context = context,
           videos = videosNeedingMetadata,
           metadataCache = metadataCache,
           includeVideoCodec = browserPreferences.showCodecSupportIndicator.get(),
@@ -123,7 +125,6 @@ object MetadataRetrieval {
     }
 
   private suspend fun extractMetadataByVideoPath(
-    context: Context,
     videos: List<Video>,
     metadataCache: VideoMetadataCacheRepository,
     includeVideoCodec: Boolean,
@@ -147,6 +148,39 @@ object MetadataRetrieval {
     localFiles.forEach { (video, file) ->
       localMetadata[file.absolutePath]?.let { metadata -> metadataByVideoPath[video.path] = metadata }
     }
+
+    // Archive entries are streamed out of the ZIP through a media data source: nothing is
+    // extracted, and the result is cached by entry identity instead of a path that does not exist
+    // on disk.
+    videos
+      .asSequence()
+      .filter { video -> ZipArchiveMedia.isPlaybackUri(video.uri.toString()) }
+      .forEach { video ->
+        val stamp = ZipArchiveMedia.entryCacheStamp(video.uri) ?: return@forEach
+        val metadata =
+          metadataCache.getOrExtractArchiveMetadata(
+            entryKey = stamp.key,
+            archiveSize = stamp.archiveSize,
+            archiveDateModifiedSeconds = stamp.archiveModifiedSeconds,
+          ) {
+            ZipArchiveMedia
+              .entryMetadata(stamp, video.uri)
+              // An unreadable entry must not be cached as "no metadata", or the next attempt would
+              // never retry it.
+              ?.takeIf { entry -> entry.durationMs > 0L || entry.width > 0 }
+              ?.let { entry ->
+                MediaInfoOps.VideoMetadata(
+                  sizeBytes = stamp.archiveSize,
+                  durationMs = entry.durationMs,
+                  width = entry.width,
+                  height = entry.height,
+                  fps = entry.fps,
+                  hasEmbeddedSubtitles = false,
+                )
+              }
+          }
+        if (metadata != null) metadataByVideoPath[video.path] = metadata
+      }
 
     return metadataByVideoPath
   }
@@ -172,7 +206,8 @@ object MetadataRetrieval {
         return@withContext folder
       }
 
-      // Archive folders keep duration at 0: measuring it would require extracting every episode.
+      // Archive folders keep duration at 0: a folder total would mean streaming every entry out
+      // of the archive, which is too much work for a chip.
       if (ZipArchiveMedia.isBrowserPath(folder.path)) {
         return@withContext folder
       }

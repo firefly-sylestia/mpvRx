@@ -10,8 +10,20 @@
 package app.gyrolet.mpvrx.domain.archive
 
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.os.ParcelFileDescriptor
+import android.os.Process
+import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.provider.OpenableColumns
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import android.text.format.Formatter
 import app.gyrolet.mpvrx.domain.browser.FileSystemItem
 import app.gyrolet.mpvrx.domain.browser.PathComponent
@@ -20,6 +32,7 @@ import app.gyrolet.mpvrx.domain.media.model.VideoFolder
 import app.gyrolet.mpvrx.ui.player.resolveLocalPath
 import app.gyrolet.mpvrx.utils.storage.FileTypeUtils
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.IOException
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
@@ -36,10 +49,56 @@ object ZipArchiveMedia {
   private const val BROWSER_AUTHORITY = "local"
   private const val PLAYBACK_SCHEME = "archive"
   private const val MAX_ENTRIES = 100_000
+  private const val MAX_CACHED_ENTRY_METADATA = 512
+  private const val EXTERNAL_STORAGE_AUTHORITY = "com.android.externalstorage.documents"
+  private const val DOWNLOADS_AUTHORITY = "com.android.providers.downloads.documents"
+  private const val MEDIA_AUTHORITY = "com.android.providers.media.documents"
 
   data class Location(
     val archivePath: String,
     val directory: String,
+  ) {
+    /**
+     * The entry path when this location was parsed from a playback URI: `parsePlaybackLocation()`
+     * reuses [directory] for it, and [archivePath] for the archive.
+     */
+    val entryPath: String get() = directory
+  }
+
+  /** Duration and geometry of one archive entry, read out of the archive without extracting it. */
+  data class EntryMetadata(
+    val durationMs: Long,
+    val width: Int,
+    val height: Int,
+    val fps: Float,
+  )
+
+  /**
+   * Cache identity for an archive entry.
+   *
+   * The entry has no file on disk to key by, so [key] is the playback URI, and the archive's own
+   * size and modification time invalidate the entry when the archive is replaced.
+   */
+  data class EntryCacheStamp(
+    val key: String,
+    val archiveSize: Long,
+    val archiveModifiedSeconds: Long,
+  )
+
+  /** Playable contents of an archive, as stored by a read-only ZIP playlist. */
+  data class PlaylistContent(
+    val source: String,
+    val name: String,
+    val videos: List<Video>,
+  )
+
+  /**
+   * A playable URI for one archive entry, plus the provider descriptor when the archive itself had
+   * to be opened as a stream.
+   */
+  data class OpenedPlayback(
+    val uri: String,
+    val descriptor: ParcelFileDescriptor? = null,
   )
 
   private data class FolderStats(
@@ -63,6 +122,9 @@ object ZipArchiveMedia {
 
   private val statsCache = ConcurrentHashMap<StatsKey, ArchiveStats>()
 
+  /** Memoizes entry metadata for the session, so a folder is only ever read once per entry. */
+  private val entryMetadataCache = ConcurrentHashMap<String, EntryMetadata>()
+
   fun isZipFile(file: File): Boolean = file.isFile && file.extension.equals("zip", ignoreCase = true)
 
   /**
@@ -70,8 +132,12 @@ object ZipArchiveMedia {
    *
    * Archives are kept read-only in place: nothing is copied into app storage and no entry is
    * extracted to cache, so a 20 GB archive costs nothing beyond the file the user already has.
-   * Returns null when the URI cannot be mapped to an accessible filesystem path (for example a
-   * provider that only exposes a stream).
+   *
+   * A `content://` URI needs more than [resolveLocalPath] alone: the Downloads provider hands out
+   * `msf:<id>` document IDs, which carry no path at all, so picking an archive that lives in
+   * Downloads used to fail with "Cannot open ZIP archive". Those are resolved from the descriptor
+   * the provider opens for us as a last resort. Returns null only when no readable filesystem path
+   * exists (for example a cloud provider that streams on demand).
    */
   suspend fun resolveZipPath(
     context: Context,
@@ -79,24 +145,7 @@ object ZipArchiveMedia {
   ): String? =
     withContext(Dispatchers.IO) {
       try {
-        val directFile =
-          when (uri.scheme?.lowercase(Locale.ROOT)) {
-            "file" -> uri.path?.let(::File)
-            "content" -> {
-              runCatching { uri.resolveLocalPath(context) }
-                .getOrNull()
-                ?.let(::File)
-                ?.takeIf { file -> isZipFile(file) && isReadableZipArchive(file) }
-                ?: resolveMediaStorePath(context, uri)
-                ?: resolveExternalStoragePath(uri)
-            }
-            else -> null
-          }
-
-        directFile
-          ?.takeIf { file -> isZipFile(file) && isReadableZipArchive(file) }
-          ?.absolutePath
-          ?: materializeArchiveForPlayback(context, uri)
+        resolveArchiveFile(context, uri)?.absolutePath
       } catch (cancelled: CancellationException) {
         throw cancelled
       } catch (_: Exception) {
@@ -105,105 +154,322 @@ object ZipArchiveMedia {
     }
 
   /**
-   * Resolves common MediaStore/DocumentsProvider URIs to their real path. SAF intentionally
-   * exposes content URIs rather than filesystem paths, so this is only a best-effort optimization.
+   * Candidates are tried in order and the first one that opens as a real ZIP wins, so a provider
+   * that reports a path the app cannot actually read simply falls through to the next strategy.
    */
-  @Suppress("DEPRECATION")
-  private fun resolveMediaStorePath(
+  private fun resolveArchiveFile(
+    context: Context,
+    uri: Uri,
+  ): File? {
+    val candidates = mutableListOf<File>()
+    when (uri.scheme?.lowercase(Locale.ROOT)) {
+      "file" -> uri.path?.let { candidates += File(it) }
+      "content" -> {
+        runCatching { uri.resolveLocalPath(context) }.getOrNull()?.let { candidates += File(it) }
+        resolveDescriptorPath(context, uri)?.let { candidates += it }
+      }
+    }
+    return candidates.firstOrNull { file -> file.isAbsolute && isZipFile(file) && isReadableZipArchive(file) }
+  }
+
+  /**
+   * Runs [block] against a retriever whose data source streams the archive entry straight out of
+   * the ZIP, so metadata and frames can be read without materializing the entry anywhere.
+   *
+   * Returns null when the entry cannot be opened or read.
+   */
+  internal suspend fun <T> withEntryRetriever(
+    uri: Uri,
+    block: (MediaMetadataRetriever) -> T,
+  ): T? =
+    withContext(Dispatchers.IO) {
+      val location = parsePlaybackLocation(uri.toString()) ?: return@withContext null
+      val archive = File(location.archivePath)
+      if (!isZipFile(archive) || !archive.canRead()) return@withContext null
+
+      val source =
+        runCatching { ZipEntryMediaDataSource(archive, location.entryPath) }.getOrNull()
+          ?: return@withContext null
+      val retriever = MediaMetadataRetriever()
+      try {
+        retriever.setDataSource(source)
+        runCatching { block(retriever) }.getOrNull()
+      } catch (cancelled: CancellationException) {
+        throw cancelled
+      } catch (_: Exception) {
+        null
+      } finally {
+        runCatching {
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) retriever.close() else retriever.release()
+        }
+        source.close()
+      }
+    }
+
+  /** Cache identity for [uri], or null when it is not an archive entry. */
+  fun entryCacheStamp(uri: Uri): EntryCacheStamp? =
+    parsePlaybackLocation(uri.toString())?.let { location ->
+      val archive = File(location.archivePath)
+      EntryCacheStamp(
+        key = uri.toString(),
+        archiveSize = archive.length(),
+        archiveModifiedSeconds = archive.lastModified() / 1000L,
+      )
+    }
+
+  /**
+   * Reads an entry's duration, resolution and frame rate by streaming it out of the archive.
+   *
+   * Nothing is written to disk, but a pass costs roughly one read of the entry, so results are
+   * memoized for the session (and persisted by the callers' metadata cache).
+   */
+  suspend fun entryMetadata(
+    stamp: EntryCacheStamp,
+    uri: Uri,
+  ): EntryMetadata? {
+    val cacheKey = "${stamp.archiveModifiedSeconds}\u0000${stamp.archiveSize}\u0000${stamp.key}"
+    entryMetadataCache[cacheKey]?.let { cached -> return cached }
+
+    val metadata =
+      withEntryRetriever(uri) { retriever ->
+        EntryMetadata(
+          durationMs =
+            retriever
+              .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+              ?.toLongOrNull()
+              ?.coerceAtLeast(0L)
+              ?: 0L,
+          width =
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0,
+          height =
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0,
+          fps =
+            retriever
+              .extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)
+              ?.toFloatOrNull()
+              ?: 0f,
+        )
+      }
+
+    if (metadata != null && metadata.durationMs > 0L) rememberEntryMetadata(cacheKey, metadata)
+    return metadata
+  }
+
+  private fun rememberEntryMetadata(
+    cacheKey: String,
+    metadata: EntryMetadata,
+  ) {
+    if (entryMetadataCache.size >= MAX_CACHED_ENTRY_METADATA) {
+      entryMetadataCache.keys.firstOrNull()?.let { oldest -> entryMetadataCache.remove(oldest) }
+    }
+    entryMetadataCache[cacheKey] = metadata
+  }
+
+  /**
+   * Reads the real path back out of an open file descriptor.
+   *
+   * A document provider always opens the underlying file for us, so `/proc/self/fd` reveals where
+   * it actually lives even when the document ID itself does not contain a path (Downloads'
+   * `msf:<id>`). The descriptor is closed again immediately: nothing is copied and no cache is
+   * written.
+   */
+  private fun resolveDescriptorPath(
     context: Context,
     uri: Uri,
   ): File? =
     runCatching {
-      context.contentResolver.query(
-        uri,
-        arrayOf(MediaStore.MediaColumns.DATA),
-        null,
-        null,
-        null,
-      )?.use { cursor ->
-        val index = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
-        if (index >= 0 && cursor.moveToFirst()) cursor.getString(index)?.let(::File) else null
+      context.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+        Os
+          .readlink("/proc/self/fd/${descriptor.fd}")
+          ?.removeSuffix(" (deleted)")
+          ?.takeIf { path -> path.startsWith('/') }
+          ?.let { path -> File(path) }
       }
     }.getOrNull()
 
-  private fun resolveExternalStoragePath(uri: Uri): File? {
-    val authority = uri.authority?.lowercase(Locale.ROOT) ?: return null
-    if (!authority.contains("externalstorage")) return null
-
-    val documentId =
-      runCatching { android.provider.DocumentsContract.getDocumentId(uri) }.getOrNull() ?: return null
-    val separator = documentId.indexOf(':')
-    if (separator <= 0) return null
-
-    val volume = documentId.substring(0, separator)
-    val relativePath = Uri.decode(documentId.substring(separator + 1))
-    if (!volume.equals("primary", ignoreCase = true) || relativePath.isBlank()) return null
-
-    return File(android.os.Environment.getExternalStorageDirectory(), relativePath)
+  /** Reads (and caches) the playable contents of an archive without extracting any entry. */
+  /**
+   * Reads the playable contents of an archive so it can be stored as a read-only playlist.
+   *
+   * Nothing is copied or extracted: [resolveZipPath] hands back the file the user already has, and
+   * the playlist only remembers that path together with the entry names inside it.
+   */
+  suspend fun playlistContent(context: Context, uri: Uri): PlaylistContent = withContext(Dispatchers.IO) {
+    val source = resolveZipPath(context, uri) ?: throw IOException("Cannot open a seekable ZIP source")
+    readArchive(context, source) { archive ->
+      require(archive.size() <= MAX_ENTRIES) { "ZIP archive has too many entries" }
+    }
+    val videos = allMedia(context, browserPath(source), includeAudio = true).getOrThrow()
+      .distinctBy { it.path }
+    currentCoroutineContext().ensureActive()
+    require(videos.isNotEmpty()) { "ZIP archive contains no playable media" }
+    PlaylistContent(source, archiveDisplayName(context, uri, File(source).takeIf { it.isAbsolute }), videos)
   }
 
   /**
-   * Some document providers expose only a content:// stream. Keep the ZIP container compressed
-   * and copy only that container into app-private storage; no ZIP entry is extracted.
+   * Opens the archive for reading, straight off disk when the source is a path and straight from a
+   * provider descriptor when it is a `content://` URI.
    */
-  private fun materializeArchiveForPlayback(
-    context: Context,
-    uri: Uri,
-  ): String? {
-    if (!uri.scheme.equals("content", ignoreCase = true)) return null
-
-    val displayName =
-      runCatching {
-        context.contentResolver.query(
-          uri,
-          arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
-          null,
-          null,
-          null,
-        )?.use { cursor ->
-          val index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-          if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
-        }
-      }.getOrNull()
-        ?.takeIf { it.endsWith(".zip", ignoreCase = true) }
-        ?: "archive.zip"
-
-    val archiveDirectory = File(context.filesDir, "archives").apply { mkdirs() }
-    val safeName = displayName.replace(Regex("[^A-Za-z0-9._-]"), "_")
-    val stableName = "${uri.toString().hashCode().toUInt().toString(16)}_$safeName"
-    val destination = File(archiveDirectory, stableName)
-
-    if (destination.isFile && destination.length() > 0L && isReadableZipArchive(destination)) {
-      return destination.absolutePath
-    }
-
-    val temp = File(archiveDirectory, "$stableName.part")
-    return try {
-      context.contentResolver.openInputStream(uri)?.use { input ->
-        temp.outputStream().use { output -> input.copyTo(output) }
-      } ?: return null
-
-      if (!temp.renameTo(destination)) {
-        temp.copyTo(destination, overwrite = true)
-        temp.delete()
+  private fun <T> readArchive(context: Context, source: String, block: (ZipFile) -> T): T {
+    if (source.startsWith("content://")) {
+      return openDescriptor(context, Uri.parse(source)).use { descriptor ->
+        ZipFile("/proc/self/fd/${descriptor.fd}").use(block)
       }
+    }
+    return ZipFile(source).use(block)
+  }
 
-      destination
-        .takeIf { isZipFile(it) && isReadableZipArchive(it) }
-        ?.absolutePath
-        ?.also { path ->
-          android.util.Log.d("ZipArchiveMedia", "Materialized ZIP container for SAF playback: $path")
-        }
-    } catch (cancelled: CancellationException) {
-      temp.delete()
-      throw cancelled
-    } catch (_: Exception) {
-      temp.delete()
-      null
+  private fun openDescriptor(context: Context, uri: Uri): ParcelFileDescriptor {
+    val descriptor =
+      context.contentResolver.openFileDescriptor(uri, "r") ?: throw IOException("ZIP source is unavailable")
+    try {
+      Os.lseek(descriptor.fileDescriptor, 0L, OsConstants.SEEK_SET)
+      return descriptor
+    } catch (error: Exception) {
+      descriptor.close()
+      throw IOException("ZIP source must support seekable access", error)
     }
   }
 
-  /** Reads (and caches) the playable contents of an archive without extracting any entry. */
+  /** Turns a stored archive entry URI back into something mpv can play, without extracting it. */
+  fun openPlayback(context: Context, value: String): OpenedPlayback {
+    val location = parsePlaybackLocation(value) ?: throw IOException("Invalid ZIP entry")
+    if (!location.archivePath.startsWith("content://")) {
+      val file = File(location.archivePath)
+      if (!file.isFile || !file.canRead()) throw IOException("ZIP source is unavailable")
+      return OpenedPlayback(playbackUri(location.archivePath, location.entryPath))
+    }
+    val descriptor = openDescriptor(context, Uri.parse(location.archivePath))
+    return try {
+      OpenedPlayback(playbackUri("/proc/self/fd/${descriptor.fd}", location.entryPath), descriptor)
+    } catch (error: Exception) {
+      descriptor.close()
+      throw error
+    }
+  }
+
+  /** The archive an entry URI lives in, for playlist items backed by a ZIP. */
+  fun sourceOf(value: String): String? = parsePlaybackLocation(value)?.archivePath
+
+  /** The entry path inside the archive, without the `archive://` envelope. */
+  fun entryPathOf(value: String): String? = parsePlaybackLocation(value)?.entryPath
+
+  fun sourceAvailable(context: Context, source: String): Boolean = runCatching {
+    if (source.startsWith("content://")) {
+      openDescriptor(context, Uri.parse(source)).use { true }
+    } else {
+      File(source).let { it.isFile && it.canRead() }
+    }
+  }.getOrDefault(false)
+
+  fun sourceDeleted(context: Context, source: String): Boolean {
+    val mountedStates = setOf(Environment.MEDIA_MOUNTED, Environment.MEDIA_MOUNTED_READ_ONLY)
+    if (!source.startsWith("content://")) {
+      val file = File(source)
+      val appOwned = file.absolutePath.startsWith(context.filesDir.absolutePath + File.separator)
+      if (!appOwned && Environment.getExternalStorageState(file) !in mountedStates) return false
+      return try {
+        Os.stat(file.absolutePath)
+        false
+      } catch (error: ErrnoException) {
+        error.errno == OsConstants.ENOENT
+      }
+    }
+
+    val uri = Uri.parse(source)
+    if (uri.authority == EXTERNAL_STORAGE_AUTHORITY) {
+      val documentId = runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull()
+      val volumeId = documentId?.substringBefore(':')
+      val relativePath = documentId?.substringAfter(':', "")?.let { normalizeEntryPath(it) }
+      if (!relativePath.isNullOrBlank() && volumeId != null) {
+        val volume = storageVolume(volumeId)
+        if (volume != null) {
+          val file = File(volume, relativePath)
+          val ancestor = generateSequence(file.parentFile) { it.parentFile }.firstOrNull { it.exists() }
+          if (ancestor?.canRead() == true && sourceDeleted(context, file.absolutePath)) return true
+        }
+      }
+    }
+
+    val readGranted =
+      context.checkUriPermission(
+        uri,
+        Process.myPid(),
+        Process.myUid(),
+        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+      ) == PackageManager.PERMISSION_GRANTED
+    if (!readGranted) return false
+
+    val volumeFile = when {
+      uri.authority == EXTERNAL_STORAGE_AUTHORITY -> {
+        val documentId = runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull() ?: return false
+        storageVolume(documentId.substringBefore(':')) ?: return false
+      }
+      uri.authority == DOWNLOADS_AUTHORITY || uri.authority == MEDIA_AUTHORITY ->
+        Environment.getExternalStorageDirectory()
+      else -> return false
+    }
+    if (Environment.getExternalStorageState(volumeFile) !in mountedStates) return false
+    return try {
+      context.contentResolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID), null, null, null)
+        ?.use { !it.moveToFirst() } ?: false
+    } catch (_: FileNotFoundException) {
+      true
+    } catch (_: Exception) {
+      false
+    }
+  }
+
+  /** Maps a MediaStore volume id onto the directory it is mounted at, when that id is sane. */
+  private fun storageVolume(volumeId: String): File? =
+    when {
+      volumeId == "primary" -> Environment.getExternalStorageDirectory()
+      volumeId.matches(Regex("[A-Za-z0-9-]+")) -> File("/storage/$volumeId")
+      else -> null
+    }
+
+  /**
+   * Drops the cache folders older versions used for extracted archives, keeping whatever the entry
+   * that is currently playing still needs.
+   */
+  fun clearLegacyCache(context: Context, activeUri: String? = null) {
+    val activeSource = activeUri?.let { sourceOf(it) }
+    val roots = listOf(context.cacheDir, context.filesDir) + context.externalCacheDirs.filterNotNull()
+    for (root in roots.distinct()) {
+      for (name in listOf("zip_archives", "zip_entries", "imported_zip_archives")) {
+        val directory = File(root, name)
+        if (activeSource?.startsWith(directory.absolutePath + File.separator) == true) continue
+        if (directory.exists() && directory.canonicalFile.parentFile == root.canonicalFile) {
+          directory.deleteRecursively()
+        }
+      }
+    }
+  }
+
+  /** A display name for the archive, preferring what the provider reports over the file name. */
+  private fun archiveDisplayName(
+    context: Context,
+    uri: Uri,
+    localFile: File?,
+  ): String {
+    val providerName = runCatching {
+      context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+        val nameColumn = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+        if (nameColumn >= 0 && cursor.moveToFirst()) cursor.getString(nameColumn) else null
+      }
+    }.getOrNull()
+    val safeName =
+      (providerName ?: localFile?.name)
+        ?.substringAfterLast('/')
+        ?.substringAfterLast('\\')
+        ?.trim()
+        ?.replace(Regex("[\\u0000-\\u001f\\u007f]"), "_")
+        ?.take(120)
+        ?.takeIf { it.isNotEmpty() && it != "." && it != ".." }
+        ?: "archive"
+    return if (safeName.endsWith(".zip", ignoreCase = true)) safeName else "$safeName.zip"
+  }
+
   private fun inspectArchive(
     archive: File,
     includeAudio: Boolean,
@@ -559,6 +825,19 @@ object ZipArchiveMedia {
       isAudio = isAudio,
     )
     return FileSystemItem.VideoFile(displayName, uri.toString(), modifiedMillis, video)
+  }
+
+  /** Finds an entry by the normalized path used in playback URIs. */
+  internal fun findEntry(
+    archive: ZipFile,
+    entryPath: String,
+  ): ZipEntry? {
+    val entries = archive.entries()
+    while (entries.hasMoreElements()) {
+      val entry = entries.nextElement()
+      if (normalizedEntryName(entry) == entryPath) return entry
+    }
+    return null
   }
 
   private fun normalizedEntryName(entry: ZipEntry): String? {

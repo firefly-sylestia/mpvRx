@@ -44,6 +44,15 @@ data class MusicSong(
     get() = if (hasAlbumTag) albumId.takeIf { it > 0 } ?: album.hashCode().toLong() else null
 }
 
+internal fun Iterable<MusicSong>.sortedByAlbumTrack(): List<MusicSong> =
+  sortedWith(
+    compareBy<MusicSong> { it.trackNumber <= 0 }
+      .thenBy { song -> if (song.trackNumber >= 1000) song.trackNumber / 1000 else 1 }
+      .thenBy { song -> song.trackNumber.takeIf { it > 0 }?.rem(1000)?.takeIf { it > 0 } ?: Int.MAX_VALUE }
+      .thenBy { it.title.lowercase() }
+      .thenBy { it.id },
+  )
+
 @Immutable
 data class MusicAlbum(
   val id: Long,

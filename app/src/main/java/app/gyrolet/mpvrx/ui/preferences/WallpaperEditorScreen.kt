@@ -58,6 +58,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -152,7 +153,14 @@ data class WallpaperEditorScreen(
     var previewAspect by rememberSaveable(sourceUri) { mutableStateOf<Float?>(null) }
     var showHomePreview by rememberSaveable(sourceUri) { mutableStateOf(false) }
     // "" = no wallpaper, "preset:<id>" = code-drawn preset, anything else = user picked image.
-    var selectedSource by rememberSaveable(sourceUri) { mutableStateOf(resolvedSource) }
+    val selectedSourceSaver =
+      remember {
+        Saver<String, String>(
+          save = { source -> source.takeUnless { it.startsWith("data:", ignoreCase = true) } },
+          restore = { it },
+        )
+      }
+    var selectedSource by rememberSaveable(sourceUri, stateSaver = selectedSourceSaver) { mutableStateOf(resolvedSource) }
     val loadedWallpaper =
       produceState<Pair<String, Bitmap?>?>(initialValue = null, selectedSource) {
         val source = selectedSource

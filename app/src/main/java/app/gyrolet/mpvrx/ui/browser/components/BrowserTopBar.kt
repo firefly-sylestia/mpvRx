@@ -22,7 +22,6 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -50,7 +49,6 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -68,8 +66,6 @@ import androidx.compose.ui.unit.dp
 import app.gyrolet.mpvrx.R
 import app.gyrolet.mpvrx.preferences.AppearancePreferences
 import app.gyrolet.mpvrx.preferences.preference.collectAsState
-import app.gyrolet.mpvrx.presentation.components.FrozenSurfaceStyle
-import app.gyrolet.mpvrx.presentation.components.frozenSurface
 import app.gyrolet.mpvrx.ui.icons.Icon
 import app.gyrolet.mpvrx.ui.icons.Icons
 import app.gyrolet.mpvrx.ui.player.controls.components.tvFocusHighlight
@@ -127,26 +123,9 @@ fun BrowserTopBar(
 ) {
   val reducedMotion = AppMotion.shouldReduceMotion()
   val haptics = rememberAppHaptics()
-  val wallpaperActive = LocalAppWallpaperActive.current
-  val defaultContainerColor =
-    if (wallpaperActive) {
-      Color.Transparent
-    } else if (MaterialTheme.colorScheme.background == Color.Black) {
-      Color.Black
-    } else {
-      MaterialTheme.colorScheme.surfaceContainer
-    }
-  val resolvedColors = colors ?: TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
   AnimatedContent(
     targetState = isInSelectionMode,
-    modifier =
-      modifier
-        .fillMaxWidth()
-        .frozenSurface(
-          shape = RectangleShape,
-          style = FrozenSurfaceStyle.TopBar,
-          fallbackColor = defaultContainerColor,
-        ),
+    modifier = modifier,
     transitionSpec = {
       val enter = fadeIn(tween(if (reducedMotion) 0 else 180))
       val exit = fadeOut(tween(if (reducedMotion) 0 else 100))
@@ -193,7 +172,7 @@ fun BrowserTopBar(
         onRestore = onRestoreClick,
         modifier = toolbarModifier,
         useRemoveIcon = useRemoveIcon,
-        colors = resolvedColors,
+        colors = colors,
         additionalActions = additionalActions,
       )
     } else {
@@ -211,7 +190,7 @@ fun BrowserTopBar(
         modifier = toolbarModifier,
         onTitleLongPress = onTitleLongPress,
         onTitleDoubleTap = onTitleDoubleTap,
-        colors = resolvedColors,
+        colors = colors,
         forceHeadlineSmall = forceHeadlineSmall,
         showBetaBadge = showBetaBadge,
       )

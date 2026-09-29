@@ -70,6 +70,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.layout
@@ -91,8 +92,11 @@ import app.gyrolet.mpvrx.preferences.PlayerPreferences
 import app.gyrolet.mpvrx.preferences.preference.collectAsState
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.gyrolet.mpvrx.presentation.Screen
-import app.gyrolet.mpvrx.presentation.components.FrozenSurface
-import app.gyrolet.mpvrx.presentation.components.FrozenSurfaceStyle
+import app.gyrolet.mpvrx.presentation.components.ProvideLiquidGlassBackdrop
+import app.gyrolet.mpvrx.presentation.components.LiquidGlassStyle
+import app.gyrolet.mpvrx.presentation.components.LiquidGlassSurface
+import app.gyrolet.mpvrx.presentation.components.captureLiquidGlassBackdrop
+import app.gyrolet.mpvrx.presentation.components.rememberLiquidGlassBackdrop
 import app.gyrolet.mpvrx.ui.utils.LocalBackStack
 import app.gyrolet.mpvrx.ui.utils.navigateTo
 import app.gyrolet.mpvrx.ui.browser.folderlist.FolderListScreen
@@ -109,6 +113,14 @@ import app.gyrolet.mpvrx.ui.player.controls.components.tvFocusHighlight
 import app.gyrolet.mpvrx.ui.player.controls.components.tvInitialFocus
 import app.gyrolet.mpvrx.ui.player.NavigationAnimStyle
 import app.gyrolet.mpvrx.ui.utils.navigationDurationMillis
+import dev.chrisbanes.haze.HazeInput
+import dev.chrisbanes.haze.HazeProgressive
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.blur.HazeBlurStyle
+import dev.chrisbanes.haze.blur.HazeColorEffect
+import dev.chrisbanes.haze.blur.hazeBlur
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
@@ -182,6 +194,7 @@ object MainScreen : Screen {
     val showNetworkTab by appearancePreferences.showNetworkTab.collectAsState()
     val showJellyfinTab by appearancePreferences.showJellyfinTab.collectAsState()
     val showSnapshotTab by appearancePreferences.showSnapshotTab.collectAsState()
+    val liquidGlassEnabled by appearancePreferences.liquidGlassEnabled.collectAsState()
     val hideNavigationBar = NavigationBarState.shouldHideNavigationBar
     val isPermissionDenied = NavigationBarState.isPermissionDenied
     val isDualPaneFolderSelected = NavigationBarState.isDualPaneFolderSelected
@@ -342,6 +355,10 @@ object MainScreen : Screen {
             context.applicationContext as android.app.Application,
           ),
       )
+    val navigationBackdrop = rememberLiquidGlassBackdrop()
+    val navigationHaze = rememberHazeState()
+    val navigationHazeSource = if (liquidGlassEnabled) Modifier.hazeSource(navigationHaze) else Modifier
+
     // Scaffold with bottom navigation bar
     Scaffold(
       modifier = Modifier.fillMaxSize(),
@@ -350,7 +367,11 @@ object MainScreen : Screen {
       Box(modifier = Modifier.fillMaxSize()) {
         if (visibleTabs.isEmpty()) {
           Box(
-            modifier = Modifier.fillMaxSize(),
+            modifier =
+              Modifier
+                .fillMaxSize()
+                .captureLiquidGlassBackdrop(navigationBackdrop, liquidGlassEnabled)
+                .then(navigationHazeSource),
           ) {
             CompositionLocalProvider(
               LocalNavigationBarHeight provides contentBottomPadding,
@@ -369,7 +390,9 @@ object MainScreen : Screen {
               modifier =
                 Modifier
                   .fillMaxSize()
-                  .clipToBounds(),
+                  .clipToBounds()
+                  .captureLiquidGlassBackdrop(navigationBackdrop, liquidGlassEnabled)
+                  .then(navigationHazeSource),
               key = { page -> visibleTabs[page].name },
               beyondViewportPageCount = 1,
               userScrollEnabled = !isPermissionDenied,
@@ -573,7 +596,11 @@ object MainScreen : Screen {
         }
 
         // Animated bottom navigation bar with slide animations
-        AnimatedVisibility(
+        ProvideLiquidGlassBackdrop(
+          backdrop = navigationBackdrop,
+          enabled = liquidGlassEnabled,
+        ) {
+          AnimatedVisibility(
             visible = !hideNavigationBar && navigationTabs.isNotEmpty() && !isPermissionDenied,
             enter = if (navStyle == NavigationAnimStyle.None) EnterTransition.None else
               slideInVertically(
@@ -588,52 +615,91 @@ object MainScreen : Screen {
             modifier =
               Modifier
                 .fillMaxWidth()
-                .align(Alignment.BottomStart)
-                .navigationBarsPadding()
-                .padding(bottom = 12.dp),
+                .align(Alignment.BottomStart),
           ) {
-            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-              val containerWidth = maxWidth
-              val density = LocalDensity.current
-              val centerFraction = animateFloatAsState(
-                targetValue = when {
-                  isDualPaneFolderSelected && selectedTab == MainTab.HOME -> 0.2f
-                  isMiniPlayerVisible && (isLandscape || isTablet) -> 0f
-                  else -> 0.5f
-                },
-                animationSpec = if (navStyle == NavigationAnimStyle.None) snap() else tween(duration, easing = FastOutSlowInEasing),
-                label = "pill_alignment",
-              )
-
-              ExpressivePillNavigationBar(
-                visibleTabs = navigationTabs,
-                selectedTab = selectedTab,
-                onTabSelected = onTabSelected,
-                pagerState = pagerState,
-                modifier = Modifier
-                  .layout { measurable, constraints ->
-                    val margin = 16.dp.roundToPx()
-                    val placeable = measurable.measure(
-                      constraints.copy(minWidth = 0, maxWidth = (constraints.maxWidth - margin * 2).coerceAtLeast(0)),
-                    )
-                    layout(constraints.maxWidth, placeable.height) {
-                      // Place using the actual width, avoiding springs chasing animated measurements.
-                      val start = (constraints.maxWidth * centerFraction.value - placeable.width / 2f)
-                        .roundToInt().coerceAtLeast(margin)
-                      placeable.placeRelative(start, 0)
-                    }
-                  }
-                  .onGloballyPositioned { coords ->
-                    val width = with(density) { coords.size.width.toDp() }
-                    NavigationBarState.navbarWidth = width
-                    NavigationBarState.navbarLeftOffset =
-                      (containerWidth * centerFraction.value - width / 2).coerceAtLeast(16.dp)
+            Box(modifier = Modifier.fillMaxWidth()) {
+              if (liquidGlassEnabled) {
+                ProgressiveNavigationBackdrop(navigationHaze, Modifier.matchParentSize())
+              }
+              BoxWithConstraints(
+                modifier =
+                  Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(top = if (liquidGlassEnabled) 24.dp else 0.dp, bottom = 12.dp),
+              ) {
+                val containerWidth = maxWidth
+                val density = LocalDensity.current
+                val centerFraction = animateFloatAsState(
+                  targetValue = when {
+                    isDualPaneFolderSelected && selectedTab == MainTab.HOME -> 0.2f
+                    isMiniPlayerVisible && (isLandscape || isTablet) -> 0f
+                    else -> 0.5f
                   },
-              )
+                  animationSpec = if (navStyle == NavigationAnimStyle.None) snap() else tween(duration, easing = FastOutSlowInEasing),
+                  label = "pill_alignment",
+                )
+
+                ExpressivePillNavigationBar(
+                  visibleTabs = navigationTabs,
+                  selectedTab = selectedTab,
+                  onTabSelected = onTabSelected,
+                  pagerState = pagerState,
+                  modifier = Modifier
+                    .layout { measurable, constraints ->
+                      val margin = 16.dp.roundToPx()
+                      val placeable = measurable.measure(
+                        constraints.copy(minWidth = 0, maxWidth = (constraints.maxWidth - margin * 2).coerceAtLeast(0)),
+                      )
+                      layout(constraints.maxWidth, placeable.height) {
+                        // Place using the actual width, avoiding springs chasing animated measurements.
+                        val start = (constraints.maxWidth * centerFraction.value - placeable.width / 2f)
+                          .roundToInt().coerceAtLeast(margin)
+                        placeable.placeRelative(start, 0)
+                      }
+                    }
+                    .onGloballyPositioned { coords ->
+                      val width = with(density) { coords.size.width.toDp() }
+                      NavigationBarState.navbarWidth = width
+                      NavigationBarState.navbarLeftOffset =
+                        (containerWidth * centerFraction.value - width / 2).coerceAtLeast(16.dp)
+                    },
+                )
+              }
             }
+          }
         }
       }
     }
+  }
+}
+
+@Composable
+private fun ProgressiveNavigationBackdrop(
+  state: HazeState,
+  modifier: Modifier = Modifier,
+) {
+  val surfaceColor = MaterialTheme.colorScheme.surface
+  BoxWithConstraints(modifier = modifier) {
+    val heightPx = constraints.maxHeight.toFloat().coerceAtLeast(1f)
+    val blurStyle = remember(surfaceColor, heightPx) {
+      HazeBlurStyle {
+        blurRadius(28.dp)
+        noiseFactor(0f)
+        backgroundColor(surfaceColor)
+        colorEffects(listOf(HazeColorEffect.tint(surfaceColor.copy(alpha = 0.16f))))
+        fallbackColorEffect(HazeColorEffect.tint(surfaceColor.copy(alpha = 0.85f)))
+        progressive(HazeProgressive.verticalGradient(endY = heightPx * 0.75f))
+        mask(
+          Brush.verticalGradient(
+            0f to Color.Transparent,
+            0.5f to Color.Black,
+            1f to Color.Black,
+          ),
+        )
+      }
+    }
+    Box(Modifier.fillMaxSize().hazeBlur(input = HazeInput.Sources(state), style = blurStyle))
   }
 }
 
@@ -691,11 +757,11 @@ internal fun ExpressivePillNavigationBar(
   val indicatorLeft = androidx.compose.ui.unit.lerp(tabOffsets[pageFloor], tabOffsets[pageCeil], pageFraction)
   val indicatorWidth = androidx.compose.ui.unit.lerp(tabWidths[pageFloor], tabWidths[pageCeil], pageFraction)
 
-  FrozenSurface(
+  LiquidGlassSurface(
     modifier = modifier,
     shape = CircleShape,
-    style = FrozenSurfaceStyle.Navigation,
-    tintColor = MaterialTheme.colorScheme.primary,
+    style = LiquidGlassStyle.Navigation,
+    glassColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.32f),
     fallbackColor = MaterialTheme.colorScheme.surfaceContainerHigh,
   ) {
     Box(

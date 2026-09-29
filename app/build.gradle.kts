@@ -139,8 +139,6 @@ android {
     create("preview") {
       initWith(getByName("release"))
       signingConfig = signingConfigs.getByName("debug")
-      applicationIdSuffix = ".preview"
-      resValue("string", "app_name", "mpvRx-Preview")
       buildConfigField("boolean", "IS_PREVIEW_BUILD", "true")
       versionNameSuffix = "-beta.r${getCommitCount()}"
     }
@@ -322,7 +320,8 @@ dependencies {
   implementation(libs.reorderable)
   implementation(libs.androidx.biometric)
   implementation(libs.telephoto.zoomable)
-  implementation(libs.haze)
+  implementation(libs.backdrop)
+  implementation(libs.haze.blur)
 
   // libtorrent4j's Java API plus the native library for every enabled APK ABI.
   implementation(libs.libtorrent4j)
